@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GitHub 项目可视化工具</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<style>
+:root{--bg:#0f1115;--card:#181b22;--line:#262b36;--fg:#e6e9ef;--dim:#8b93a3;--acc:#4c8dff;--green:#3fb950;--red:#f85149;}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--fg);font-family:"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;min-height:100vh}
+header{padding:18px 20px;border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;align-items:center;gap:12px}
+header h1{font-size:18px;font-weight:700}
+header .sub{color:var(--dim);font-size:12px}
+.input-row{display:flex;flex-wrap:wrap;gap:8px;padding:14px 20px;border-bottom:1px solid var(--line);align-items:center}
+#repoInput{flex:1;min-width:240px;background:var(--card);border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:10px 12px;font-size:14px;outline:none}
+#repoInput:focus{border-color:var(--acc)}
+button{background:var(--acc);color:#fff;border:none;border-radius:8px;padding:10px 16px;font-size:14px;cursor:pointer}
+button.ghost{background:var(--card);border:1px solid var(--line);color:var(--fg)}
+button:hover{filter:brightness(1.1)}
+.tok-row{display:flex;align-items:center;gap:8px;padding:8px 20px;border-bottom:1px solid var(--line);font-size:12px;color:var(--dim);flex-wrap:wrap}
+#tokenInput{width:300px;background:var(--card);border:1px solid var(--line);color:var(--fg);border-radius:6px;padding:6px 10px;font-size:12px}
+#status{padding:8px 20px;font-size:13px;color:var(--dim);min-height:24px}
+#status.err{color:var(--red)}
+#status.ok{color:var(--green)}
+.meta{display:flex;flex-wrap:wrap;gap:10px;padding:10px 20px}
+.meta .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 14px;flex:1;min-width:140px}
+.meta .card b{font-size:20px;display:block}
+.meta .card span{font-size:12px;color:var(--dim)}
+.main{display:grid;grid-template-columns:minmax(280px,380px) 1fr;gap:14px;padding:14px 20px}
+@media(max-width:860px){.main{grid-template-columns:1fr}}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;overflow:auto}
+.panel h3{font-size:13px;color:var(--dim);margin-bottom:8px;font-weight:600}
+#tree{font-size:13px;white-space:nowrap}
+#tree .dir{color:var(--acc);cursor:pointer;user-select:none}
+#tree .file{color:var(--fg)}
+#tree .dir::before{content:"▸ ";display:inline-block;transition:transform .15s}
+#tree .dir.open::before{transform:rotate(90deg)}
+#tree .node{padding:2px 4px;border-radius:4px}
+#tree .node:hover{background:var(--line)}
+#chartArea{display:grid;gap:14px;min-height:400px}
+#chartArea .chart{width:100%;height:340px}
+.fold{display:none;padding-left:18px}
+</style>
+</head>
+<body>
+<header>
+  <h1>GitHub 项目可视化工具</h1>
+  <span class="sub">粘贴仓库链接 → 自动生成目录树 + 架构图（Tools 项目地图）</span>
+</header>
+<div class="input-row">
+  <input id="repoInput" placeholder="例如：EJGuy/guy-web 或 https://github.com/EJGuy/guy-web">
+  <button onclick="loadRepo()">生成</button>
+  <button class="ghost" onclick="loadMyRepos()">我的仓库</button>
+</div>
+<div class="tok-row">
+  <span>私有仓库 Token（可选，仅存本机浏览器）：</span>
+  <input id="tokenInput" type="password" placeholder="github_pat_...">
+  <button class="ghost" onclick="saveToken()" style="padding:6px 12px;font-size:12px">保存</button>
+</div>
+<div id="status">就绪。输入 GitHub 仓库链接后点“生成”。</div>
+<div class="meta" id="meta"></div>
+<div class="main">
+  <div class="panel" style="max-height:70vh"><h3>目录结构</h3><div id="tree">—</div></div>
+  <div id="chartArea"></div>
+</div>
+
+<script>
+const GH="https://api.github.com";
+let token=localStorage.getItem("gh_viz_token")||"";
+document.getElementById("tokenInput").value=token;
+
+function hdr(){const h={Accept:"application/vnd.github+json","User-Agent":"doubao-viz"};if(token)h.Authorization="token "+token;return h;}
+function saveToken(){token=document.getElementById("tokenInput").value.trim();localStorage.setItem("gh_viz_token",token);setStatus("Token 已保存（仅存本浏览器）","ok");}
+function setStatus(msg,cls){const s=document.getElementById("status");s.textContent=msg;s.className=cls||"";}
+function esc(s){return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+
+function parseInput(){
+  const raw=document.getElementById("repoInput").value.trim();
+  if(!raw){setStatus("请输入仓库链接","err");return null;}
+  const m=raw.match(/(?:github\.com\/)?([^\/\s]+)\/([^\/\s]+)(?:\/|$)/);
+  if(!m){setStatus("格式不对，例：EJGuy/guy-web","err");return null;}
+  return {owner:m[1].replace(/\.git$/,""),repo:m[2].replace(/\.git$/,"")};
+}
+
+async function api(path){
+  const r=await fetch(GH+path,{headers:hdr()});
+  if(r.status===404)throw new Error("仓库不存在或无权访问（私有仓库需填 Token）");
+  if(r.status===403){const j=await r.json().catch(()=>({}));throw new Error("API 限流："+(j.message||"Rate limit 超限"));}
+  if(!r.ok)throw new Error("请求失败 HTTP "+r.status);
+  return r.json();
+}
+
+async function loadRepo(){
+  const p=parseInput();if(!p)return;
+  setStatus("正在获取 "+p.owner+"/"+p.repo+" ...");
+  try{
+    const info=await api("/repos/"+p.owner+"/"+p.repo);
+    const branch=info.default_branch||"main";
+    const tree=await api("/repos/"+p.owner+"/"+p.repo+"/git/trees/"+branch+"?recursive=1");
+    renderAll(info,tree.tree||[]);
+    setStatus("加载完成："+info.full_name,"ok");
+  }catch(e){setStatus("错误："+e.message,"err");}
+}
+
+async function loadMyRepos(){
+  setStatus("正在获取你的仓库列表 ...");
+  try{
+    const rs=await api("/user/repos?per_page=100&sort=updated");
+    const wrap=document.createElement("div");
+    wrap.innerHTML="<h3 style='font-size:13px;color:#8b93a3;margin:0 20px 6px'>你的仓库（点选加载）：</h3>";
+    const list=document.createElement("div");list.style.cssText="padding:0 20px 10px;display:flex;flex-wrap:wrap;gap:6px";
+    rs.forEach(r=>{const b=document.createElement("button");b.className="ghost";b.style.cssText="font-size:12px;padding:6px 10px";
+      b.textContent=r.name+(r.private?" 🔒":"");
+      b.onclick=()=>{document.getElementById("repoInput").value=r.full_name;loadRepo();};
+      list.appendChild(b);});
+    wrap.appendChild(list);
+    const old=document.getElementById("repoList");if(old)old.remove();
+    wrap.id="repoList";document.querySelector(".input-row").after(wrap);
+    setStatus("找到 "+rs.length+" 个仓库","ok");
+  }catch(e){setStatus("错误："+e.message,"err");}
+}
+
+function renderAll(info,treeArr){
+  document.getElementById("meta").innerHTML=
+    '<div class="card"><span>仓库</span><b>'+esc(info.full_name)+'</b></div>'+
+    '<div class="card"><span>描述</span><b style="font-size:13px;line-height:1.5">'+esc(info.description||"无")+'</b></div>'+
+    '<div class="card"><span>⭐ Star</span><b>'+info.stargazers_count+'</b></div>'+
+    '<div class="card"><span>⑂ Fork</span><b>'+info.forks_count+'</b></div>'+
+    '<div class="card"><span>语言</span><b>'+esc(info.language||"-")+'</b></div>'+
+    '<div class="card"><span>License</span><b style="font-size:12px">'+esc((info.license&&info.license.spdx_id)||"-")+'</b></div>';
+
+  // 过滤：只保留根级项 + 2 层以内
+  renderTree(treeArr,info);
+  renderCharts(treeArr);
+}
+
+function renderTree(treeArr){
+  const root=document.getElementById("tree");
+  root.innerHTML="";
+  const dirs=new Set(),files=new Set();
+  treeArr.forEach(t=>{if(t.path.includes("/"))return; if(t.type==="tree")dirs.add(t.path);else files.add(t.path);});
+  // 根级目录 + 文件
+  [...dirs].sort().forEach(d=>{
+    const div=document.createElement("div");div.className="node dir";div.textContent=d;
+    const fold=document.createElement("div");fold.className="fold";
+    buildSub(fold,treeArr,d+"");
+    div.onclick=()=>{div.classList.toggle("open");fold.style.display=fold.style.display==="none"?"block":"none";};
+    root.appendChild(div);root.appendChild(fold);
+  });
+  [...files].sort().forEach(f=>{
+    const div=document.createElement("div");div.className="node file";div.textContent="📄 "+f;root.appendChild(div);
+  });
+  if(!dirs.size&&!files.size)root.innerHTML="<div style='color:#8b93a3'>（空仓库或读取失败）</div>";
+}
+function buildSub(container,treeArr,prefix){
+  const subs=treeArr.filter(t=>{const p=t.path;if(!p.startsWith(prefix+"/"))return false;
+    const rest=p.slice(prefix.length+1);return !rest.includes("/");});
+  subs.forEach(t=>{
+    if(t.type==="tree"){
+      const div=document.createElement("div");div.className="node dir";div.textContent=t.path.slice(prefix.length+1);
+      const fold=document.createElement("div");fold.className="fold";
+      buildSub(fold,treeArr,t.path);
+      div.onclick=()=>{div.classList.toggle("open");fold.style.display=fold.style.display==="none"?"block":"none";};
+      container.appendChild(div);container.appendChild(fold);
+    }else{
+      const div=document.createElement("div");div.className="node file";div.textContent="📄 "+t.path.slice(prefix.length+1);container.appendChild(div);
+    }
+  });
+}
+
+function renderCharts(treeArr){
+  const area=document.getElementById("chartArea");
+  area.innerHTML="<div class='chart' id='c1'></div><div class='chart' id='c2'></div><div class='chart' id='c3'></div>";
+  // 1) 目录树图（顶层 2 层）
+  const nodes=[],links=[];
+  const topDirs=new Set(),topFiles=new Set();
+  treeArr.forEach(t=>{if(!t.path.includes("/")){if(t.type==="tree")topDirs.add(t.path);else topFiles.add(t.path);}});
+  const rootName=treeArr.length?treeArr[0].path.split("/")[0]:"?";
+  nodes.push({name:"/"});
+  const dirList=[...topDirs].sort().slice(0,12);
+  dirList.forEach((d,i)=>{
+    const did="d"+i;nodes.push({name:d,value:countIn(treeArr,d)});
+    links.push({source:"/",target:did});
+    // 二级目录（每目录前 6）
+    const sub=treeArr.filter(t=>{const p=t.path;return p.startsWith(d+"/")&&p.slice(d.length+1).includes("/")&&!p.slice(d.length+1).replace(d+"/","").includes("/");}).slice(0,6);
+    sub.forEach((s,j)=>{
+      const sid=did+"s"+j;nodes.push({name:s.path.split("/").slice(0,2).join("/"),value:countIn(treeArr,s.path)});
+      links.push({source:did,target:sid});
+    });
+  });
+  const chart1=echarts.init(document.getElementById("c1"));
+  chart1.setOption({title:{text:"目录架构图",textStyle:{color:"#e6e9ef",fontSize:13}},tooltip:{},
+    series:[{type:"tree",data:[{name:"/",children:dirList.map((d,i)=>({name:d,value:countIn(treeArr,d),children:nodes.filter(n=>links.find(l=>l.source==="d"+i&&l.target===n.name)).map(n=>({name:n.name,value:n.value}))}))}],
+    orient:"LR",symbolSize:8,label:{color:"#8b93a3",fontSize:11},lineStyle:{color:"#3a4250"},leaves:{label:{color:"#e6e9ef"}}}]});
+  window.addEventListener("resize",()=>chart1.resize());
+
+  // 2) 文件类型分布
+  const ext={};
+  treeArr.filter(t=>t.type==="blob").forEach(t=>{
+    const m=t.path.match(/\.([A-Za-z0-9]+)$/);const e=(m?m[1]:"noext").toLowerCase();
+    ext[e]=(ext[e]||0)+1;});
+  const topExt=Object.entries(ext).sort((a,b)=>b[1]-a[1]).slice(0,10);
+  const chart2=echarts.init(document.getElementById("c2"));
+  chart2.setOption({title:{text:"文件类型分布 Top10",textStyle:{color:"#e6e9ef",fontSize:13}},tooltip:{trigger:"item"},
+    series:[{type:"pie",radius:["35%","65%"],data:topExt.map(([n,v])=>({name:n,value:v})),
+    label:{color:"#8b93a3",fontSize:11},itemStyle:{borderColor:"#0f1115",borderWidth:2}}]});
+  window.addEventListener("resize",()=>chart2.resize());
+
+  // 3) 顶层目录文件数
+  const topCounts=[...topDirs].sort().map(d=>({name:d,value:countIn(treeArr,d)})).sort((a,b)=>b.value-a.value).slice(0,12);
+  const chart3=echarts.init(document.getElementById("c3"));
+  chart3.setOption({title:{text:"顶层目录文件数",textStyle:{color:"#e6e9ef",fontSize:13}},tooltip:{},grid:{left:10,right:40,top:30,bottom:10,containLabel:true},
+    xAxis:{type:"value",axisLabel:{color:"#8b93a3"},splitLine:{lineStyle:{color:"#262b36"}}},
+    yAxis:{type:"category",data:topCounts.map(t=>t.name),axisLabel:{color:"#e6e9ef",fontSize:11}},
+    series:[{type:"bar",data:topCounts.map(t=>t.value),itemStyle:{color:"#4c8dff"},barMaxWidth:18}]});
+  window.addEventListener("resize",()=>chart3.resize());
+}
+function countIn(treeArr,dir){return treeArr.filter(t=>t.path.startsWith(dir+"/")).length;}
+
+document.getElementById("repoInput").addEventListener("keydown",e=>{if(e.key==="Enter")loadRepo();});
+</script>
+</body>
+</html>
