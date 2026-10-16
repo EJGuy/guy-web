@@ -103,22 +103,43 @@ async function loadRepo(){
   }catch(e){setStatus("错误："+e.message,"err");}
 }
 
+const CATEGORIES={
+  "Tools 工具":["Umi-OCR","you-get","DeskBox","Bulk-Crap-Uninstaller","upscayl","clash-verge-rev","subs-check","FreeNodes","AingDesk","nanobrowser","LogicFlow","maxun","PandaWiki","meeting-minutes","lobehub"],
+  "学习":["Prompt-Engineering-Guide","freeCodeCamp","ChinaTextbook"],
+  "自建":["my-notes","guy-web"]
+};
+let myRepos=[];
 async function loadMyRepos(){
   setStatus("正在获取你的仓库列表 ...");
   try{
-    const rs=await api("/user/repos?per_page=100&sort=updated");
-    const wrap=document.createElement("div");
-    wrap.innerHTML="<h3 style='font-size:13px;color:#8b93a3;margin:0 20px 6px'>你的仓库（点选加载）：</h3>";
-    const list=document.createElement("div");list.style.cssText="padding:0 20px 10px;display:flex;flex-wrap:wrap;gap:6px";
-    rs.forEach(r=>{const b=document.createElement("button");b.className="ghost";b.style.cssText="font-size:12px;padding:6px 10px";
-      b.textContent=r.name+(r.private?" 🔒":"");
-      b.onclick=()=>{document.getElementById("repoInput").value=r.full_name;loadRepo();};
-      list.appendChild(b);});
-    wrap.appendChild(list);
-    const old=document.getElementById("repoList");if(old)old.remove();
-    wrap.id="repoList";document.querySelector(".input-row").after(wrap);
-    setStatus("找到 "+rs.length+" 个仓库","ok");
+    myRepos=await api("/user/repos?per_page=100&sort=updated");
+    renderRepoList("Tools 工具");
+    setStatus("找到 "+myRepos.length+" 个仓库，默认显示 Tools 工具分类","ok");
   }catch(e){setStatus("错误："+e.message,"err");}
+}
+function renderRepoList(cat){
+  const wrap=document.createElement("div");
+  wrap.innerHTML="<h3 style='font-size:13px;color:#8b93a3;margin:6px 20px 6px'>你的仓库（点选加载）：</h3>";
+  const tabs=document.createElement("div");tabs.style.cssText="padding:0 20px 8px;display:flex;gap:6px;flex-wrap:wrap";
+  const cats=["Tools 工具","全部","学习","自建"];
+  cats.forEach(c=>{const t=document.createElement("button");
+    t.className=c===cat?"":"ghost";t.style.cssText="font-size:12px;padding:5px 12px;"+(c===cat?"background:#4c8dff;border:none;color:#fff;border-radius:8px;cursor:pointer":"");
+    t.textContent=c;
+    t.onclick=()=>renderRepoList(c);
+    tabs.appendChild(t);});
+  const list=document.createElement("div");list.style.cssText="padding:0 20px 10px;display:flex;flex-wrap:wrap;gap:6px";
+  let shown;
+  if(cat==="全部"||cat==="Tools 工具")shown=myRepos;
+  else shown=myRepos.filter(r=>CATEGORIES[cat].includes(r.name));
+  if(cat==="Tools 工具")shown=myRepos.filter(r=>CATEGORIES["Tools 工具"].includes(r.name)||!Object.values(CATEGORIES).flat().includes(r.name)||r.name==="lobehub");
+  if(!shown.length){const d=document.createElement("div");d.style.cssText="font-size:12px;color:#8b93a3;padding:4px";d.textContent="（该分类暂无仓库）";list.appendChild(d);}
+  shown.forEach(r=>{const b=document.createElement("button");b.className="ghost";b.style.cssText="font-size:12px;padding:6px 10px";
+    b.textContent=r.name+(r.private?" 🔒":"");
+    b.onclick=()=>{document.getElementById("repoInput").value=r.full_name;loadRepo();};
+    list.appendChild(b);});
+  wrap.appendChild(tabs);wrap.appendChild(list);
+  const old=document.getElementById("repoList");if(old)old.remove();
+  wrap.id="repoList";document.querySelector(".input-row").after(wrap);
 }
 
 function renderAll(info,treeArr){
